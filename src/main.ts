@@ -39,17 +39,47 @@ const youtube = google.youtube({
  */
 const getRedditComments = async (articleSource: string, startDate: Moment) => {
   const youtubeLinkReg = /https:\/\/www.youtube.com[^\s\[\])(]*/;
-  const redditArticle: any[] = await reddit.get(articleSource);
+  const redditArticle: any[] = await reddit.get(articleSource, { sort: "new" });
   const [, replies] = redditArticle;
 
-  const comments: Comment[] = replies.data.children
-    .map((child: RedditChild) => ({
-      author: child.data.author,
-      body: child.data.body,
-      created: child.data.created,
-      created_utc: child.data.created_utc,
-      youtubeLink: child.data.body.match(youtubeLinkReg),
-    }))
+  const allComments = replies.data.children;
+
+  const more = replies.data.children.find(
+    (reply: any) => reply.kind === "more"
+  );
+
+  if (more) {
+    const commentIds = more.data.children;
+
+    const extraComments: any = await reddit.get("/api/morechildren", {
+      api_type: "json",
+      link_id: `t3_${ARTICLE}`,
+      children: commentIds.join(","),
+      limit_children: true,
+    });
+
+    allComments.push(...extraComments.json.data.things);
+  } else {
+    logger.info("No more comments to load.");
+  }
+
+  const comments: Comment[] = allComments
+    .filter((child: RedditChild) => child.data.author !== "[deleted]")
+    .map((child: RedditChild) => {
+      const youtubeLink = !!child.data.body
+        ? child.data.body.match(youtubeLinkReg)?.[0] || ""
+        : "https://www.youtube.com";
+      logger.info(
+        `Processing comment by ${child.data.author} with YouTube link: ${youtubeLink}`
+      );
+      return {
+        author: child.data.author,
+        body: child.data.body,
+        created: child.data.created,
+        created_utc: child.data.created_utc,
+        youtubeLink: youtubeLink,
+      };
+    })
     .filter((item: Comment) => {
       const commentCreated = moment.unix(item.created).utc();
       const now = moment.utc();
@@ -73,8 +103,15 @@ const verifyChannel = async (
   const youtubeChannelListParams: youtube_v3.Params$Resource$Channels$List = {
     part: ["snippet,statistics"],
   };
-  const formattedYoutubeLink = formatYoutubeLink(comment.youtubeLink[0]);
+  if (!comment.youtubeLink) {
+    return;
+  }
+  const formattedYoutubeLink = formatYoutubeLink(comment.youtubeLink);
   const [, slug] = formattedYoutubeLink.split("https://www.youtube.com/");
+  if (!slug) {
+    logger.warn(`Invalid YouTube link: ${formattedYoutubeLink}`);
+    return;
+  }
 
   logger.info(`Verifying /u/${comment.author} at ${formattedYoutubeLink}`);
 
